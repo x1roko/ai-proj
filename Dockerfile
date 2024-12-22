@@ -23,7 +23,7 @@ RUN mkdir -p instance && \
     chmod 777 instance
 
 # Указываем порт
-EXPOSE 5000
+EXPOSE 5200
 
 # Запускаем приложение
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "run:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5200", "--workers", "4", "run:app"]
