@@ -19,10 +19,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Создаем директорию для базы данных
-RUN mkdir -p instance
+RUN mkdir -p instance && \
+    chmod 777 instance
 
 # Указываем порт
-EXPOSE 5200
+EXPOSE 5000
 
 # Запускаем приложение
-CMD ["gunicorn", "--bind", "0.0.0.0:5200", "--workers", "4", "run:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "run:app"]

@@ -8,6 +8,7 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(days=30)
     JWT_TOKEN_LOCATION = ['headers']
     APPLICATION_ROOT = '/ai'
+    PREFERRED_URL_SCHEME = 'https'
     
     # GROQ API ключ
     GROQ_API_KEY = os.getenv('GROQ_API_KEY')
