@@ -82,7 +82,7 @@ async function validateAndRestoreSession() {
     }
 
     try {
-        const response = await fetch('/api/auth/validate-token', {
+        const response = await fetch('/ai/api/auth/validate-token', {
             headers: {
                 'Authorization': `Bearer ${token}`
             }
@@ -196,9 +196,7 @@ async function register() {
 async function logout() {
     try {
         localStorage.removeItem('token');
-        document.getElementById('account-button').style.display = 'none';
-        document.getElementById('chat-history').innerHTML = '';
-        showModeSelection();
+        window.location.href = '/ai/login';
     } catch (error) {
         console.error('Error during logout:', error);
     }
@@ -212,24 +210,20 @@ async function sendMessage() {
     
     if (!message) return;
     
-    // Блокируем кнопку и поле ввода
     messageInput.value = '';
     messageInput.disabled = true;
     sendButton.disabled = true;
     
     try {
-        // Создаем контейнеры для сообщений
         const chatHistory = document.getElementById('chat-history');
         const messageContainer = document.createElement('div');
         messageContainer.className = 'message-container';
         
-        // Добавляем сообщение пользователя
         const userDiv = document.createElement('div');
         userDiv.className = 'message user-message';
         userDiv.innerHTML = `<strong>Вы:</strong> ${formatMessage(message)}`;
         messageContainer.appendChild(userDiv);
         
-        // Добавляем сообщение бота
         const botDiv = document.createElement('div');
         botDiv.className = 'message bot-message';
         botDiv.innerHTML = '<strong>Бот:</strong> <span class="typing-cursor"></span>';
@@ -238,9 +232,8 @@ async function sendMessage() {
         chatHistory.appendChild(messageContainer);
         messageContainer.scrollIntoView({ behavior: 'smooth' });
 
-        // Отправляем запрос
         const token = localStorage.getItem('token');
-        const response = await fetch('/api/chat/chat', {
+        const response = await fetch('/ai/api/chat/chat', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -249,21 +242,45 @@ async function sendMessage() {
             body: JSON.stringify({ message })
         });
 
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
         const reader = response.body.getReader();
         let botResponse = '';
+        let decoder = new TextDecoder();
+        let buffer = '';
 
         while (true) {
             const { done, value } = await reader.read();
+            
             if (done) break;
-
-            const text = new TextDecoder().decode(value);
-            const lines = text.split('\n');
-
+            
+            buffer += decoder.decode(value, { stream: true });
+            
+            let lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            
             for (const line of lines) {
+                if (line.trim() === '') continue;
+                
                 if (line.startsWith('data: ')) {
-                    const data = JSON.parse(line.slice(6));
-                    botResponse = data.full_response;
-                    botDiv.innerHTML = `<strong>Бот:</strong> ${formatMessage(botResponse)}`;
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.error) {
+                            console.error('Server error:', data.error);
+                            botDiv.innerHTML = `<strong>Бот:</strong> Произошла ошибка: ${data.error}`;
+                            continue;
+                        }
+                        if (data.token) {
+                            botResponse = data.full_response;
+                            botResponse = botResponse.replace(/^Бот:\s*Бот:/g, 'Бот:');
+                            botDiv.innerHTML = `<strong>Бот:</strong> ${formatMessage(botResponse.replace(/^Бот:\s*/,''))}`;
+                        }
+                    } catch (e) {
+                        console.warn('Error parsing JSON:', e, 'Line:', line);
+                        continue;
+                    }
                 }
             }
         }
@@ -271,32 +288,34 @@ async function sendMessage() {
         messageContainer.scrollIntoView({ behavior: 'smooth' });
     } catch (error) {
         console.error('Error:', error);
-        alert('Ошибка при отправке сообщения');
     } finally {
-        // Разблокируем кнопку и поле ввода
         messageInput.disabled = false;
         sendButton.disabled = false;
         messageInput.focus();
     }
 }
 
-// Функция форматирования сообщения
 function formatMessage(text) {
-    // Заменяем обычные блоки кода
-    text = text.replace(/```([\s\S]*?)```/g, function(match, code) {
-        return `<div class="code-block">
-                    <button class="copy-button" onclick="copyCode(this)">Копировать</button>
-                    <pre><code>${escapeHtml(code.trim())}</code></pre>
-                </div>`;
-    });
+    if (!text) return '';
     
-    // Заменяем inline код
-    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Удаляем лишние префиксы "Бот:"
+    text = text.replace(/^Бот:\s*Бот:/g, 'Бот:');
     
-    // Заменяем переносы строк
-    text = text.replace(/\n/g, '<br>');
+    // Заменяем \n на реальные переносы строк перед форматированием
+    text = text.replace(/\\n/g, '\n');
     
-    return text;
+    // Форматируем текст
+    return text
+        .replace(/\n/g, '<br>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/```([\s\S]*?)```/g, function(match, code) {
+            return `<pre class="code-block"><code>${code.trim()}</code></pre>`;
+        })
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Форматируем маркированные списки
+        .replace(/^\s*[-*•]\s+(.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*?<\/li>\s*)+/g, '<ul>$&</ul>');
 }
 
 function escapeHtml(text) {
@@ -333,7 +352,7 @@ function startAnonymousChat() {
 async function loadHistory() {
     try {
         const token = localStorage.getItem('token');
-        const response = await fetch('/api/chat/history', {
+        const response = await fetch('/ai/api/chat/history', {
             headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         const data = await response.json();
@@ -381,6 +400,164 @@ function toggleTheme() {
 function updateThemeButton() {
     const themeButton = document.getElementById('theme-toggle');
     themeButton.textContent = currentTheme === 'light' ? '🌙' : '☀️';
+}
+
+async function clearHistory() {
+    try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/ai/api/chat/clear-history', {
+            method: 'POST',
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            document.getElementById('chat-history').innerHTML = '';
+            alert('История чата очищена');
+        } else {
+            alert(data.error || 'Ошибка при очистке истории');
+        }
+    } catch (error) {
+        console.error('Error clearing history:', error);
+        alert('Ошибка при очистке истории');
+    }
+}
+
+// Добавьте стили для блоков кода
+const style = document.createElement('style');
+style.textContent = `
+    .code-block {
+        background-color: #f5f5f5;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 10px;
+        margin: 10px 0;
+        overflow-x: auto;
+    }
+    
+    .code-block code {
+        font-family: 'Courier New', Courier, monospace;
+        white-space: pre-wrap;
+    }
+    
+    ul {
+        margin: 10px 0;
+        padding-left: 20px;
+        list-style-type: disc;
+    }
+    
+    li {
+        margin: 5px 0;
+    }
+    
+    .message {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+`;
+document.head.appendChild(style);
+
+// Добавьте эти стили в существующий блок стилей
+const additionalStyles = document.createElement('style');
+additionalStyles.textContent = `
+    .user-menu {
+        position: relative;
+        display: inline-block;
+    }
+
+    .user-menu-content {
+        display: none;
+        position: absolute;
+        right: 0;
+        background-color: #f9f9f9;
+        min-width: 160px;
+        box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.2);
+        z-index: 1;
+        border-radius: 4px;
+        transition: opacity 0.3s ease;
+        opacity: 0;
+    }
+
+    .user-menu-content.show {
+        display: block;
+        opacity: 1;
+    }
+
+    .user-menu-content a {
+        color: black;
+        padding: 12px 16px;
+        text-decoration: none;
+        display: block;
+        cursor: pointer;
+    }
+
+    .user-menu-content a:hover {
+        background-color: #f1f1f1;
+    }
+
+    .user-button {
+        background-color: #4CAF50;
+        color: white;
+        padding: 10px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .user-button:hover {
+        background-color: #45a049;
+    }
+`;
+document.head.appendChild(additionalStyles);
+
+// Добавьте эти функции для работы с аутентификацией
+let menuTimeout;
+
+function showUserMenu() {
+    clearTimeout(menuTimeout);
+    const userMenu = document.querySelector('.user-menu-content');
+    if (userMenu) {
+        userMenu.classList.add('show');
+    }
+}
+
+function hideUserMenu() {
+    const userMenu = document.querySelector('.user-menu-content');
+    if (userMenu) {
+        menuTimeout = setTimeout(() => {
+            userMenu.classList.remove('show');
+        }, 1300); // Задержка в 300мс перед скрытием
+    }
+}
+
+function keepMenuOpen() {
+    clearTimeout(menuTimeout);
+}
+
+// Обновите HTML для кнопки пользователя
+document.querySelector('.user-menu')?.remove(); // Удаляем старое меню, если есть
+
+const userMenuHTML = `
+    <div class="user-menu" onmouseenter="showUserMenu()" onmouseleave="hideUserMenu()">
+        <button class="user-button">
+            ${localStorage.getItem('token') ? 'Профиль' : 'Войти'}
+        </button>
+        <div class="user-menu-content" onmouseenter="keepMenuOpen()" onmouseleave="hideUserMenu()">
+            ${localStorage.getItem('token') 
+                ? '<a onclick="logout()">Выйти</a>'
+                : '<a href="/ai/login">Войти</a>'}
+        </div>
+    </div>
+`;
+
+// Добавляем новое меню в header
+const header = document.querySelector('header');
+if (header) {
+    const menuContainer = document.createElement('div');
+    menuContainer.style.marginLeft = 'auto';
+    menuContainer.innerHTML = userMenuHTML;
+    header.appendChild(menuContainer);
 }
 </script>
 </body>

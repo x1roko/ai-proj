@@ -12,7 +12,8 @@ def create_app(test_config=None):
     # Создаем приложение с правильным путем к шаблонам
     app = Flask(__name__,
                 template_folder='templates',  # Указываем папку с шаблонами
-                static_folder='static')       # Указываем папку со статическими файлами
+                static_folder='static',       # Указываем папку со статическими файлами
+                static_url_path='/ai/static')  # Указываем префикс для статики
     
     if test_config is None:
         app.config.from_object(Config)
@@ -34,10 +35,10 @@ def create_app(test_config=None):
 
     # Регистрация Blueprint'ов
     from app.routes import auth, chat
-    app.register_blueprint(auth.bp)
-    app.register_blueprint(chat.bp)
+    app.register_blueprint(auth.bp, url_prefix='/ai/api/auth')
+    app.register_blueprint(chat.bp, url_prefix='/ai/api/chat')
 
-    @app.route('/')
+    @app.route('/ai/')
     def index():
         return render_template('index.html')
 

@@ -24,6 +24,8 @@ def get_user_id(username):
 @bp.route('/chat', methods=['POST'])
 def chat():
     try:
+        logger.info("Starting chat request processing")
+        
         # Пробуем получить токен, но не требуем его
         try:
             verify_jwt_in_request(optional=True)
@@ -32,42 +34,110 @@ def chat():
 
         user_message = request.json.get('message')
         if not user_message:
+            logger.error("No message provided in request")
             return jsonify({'error': 'Message is required'}), 400
 
         current_user = get_jwt_identity()
+        logger.info(f"Current user: {current_user}")
+        
         user_id = get_user_id(current_user) if current_user else None
+        logger.info(f"User ID: {user_id}")
         
         if not user_id and 'anonymous_id' not in session:
             session['anonymous_id'] = str(uuid.uuid4())
             session.modified = True
-
-        logger.info(f"Processing message from user {current_user or 'anonymous'}")
+            logger.info(f"Created new anonymous session: {session['anonymous_id']}")
 
         def generate():
             try:
+                logger.info("Starting message generation")
                 response_text = ""
-                for token in get_bot_response(user_message):
-                    response_text += token
-                    yield f"data: {json.dumps({'token': token, 'full_response': response_text})}\n\n"
-
+                
+                # Инициализируем базу данных и курсор
                 db = get_db()
-                with db:
-                    cursor = db.cursor()
+                cursor = db.cursor()
+                logger.info("Database connection established")
+                
+                # Получаем предыдущие сообщения для контекста
+                previous_messages = []
+                try:
                     if user_id:
+                        logger.info(f"Fetching history for user_id: {user_id}")
                         cursor.execute('''
-                            INSERT INTO chat_history (user_id, user_message, bot_response)
-                            VALUES (?, ?, ?)
-                        ''', (user_id, user_message, response_text))
+                            SELECT user_message, bot_response 
+                            FROM chat_history 
+                            WHERE user_id = ? 
+                            ORDER BY timestamp ASC
+                            LIMIT 10
+                        ''', (user_id,))
                     else:
-                        cursor.execute('''
-                            INSERT INTO chat_history (session_id, user_message, bot_response)
-                            VALUES (?, ?, ?)
-                        ''', (session.get('anonymous_id'), user_message, response_text))
+                        session_id = session.get('anonymous_id')
+                        logger.info(f"Fetching history for session_id: {session_id}")
+                        if session_id:
+                            cursor.execute('''
+                                SELECT user_message, bot_response 
+                                FROM chat_history 
+                                WHERE session_id = ? 
+                                ORDER BY timestamp ASC
+                                LIMIT 10
+                            ''', (session_id,))
+                    
+                    # Получаем результаты запроса
+                    history_rows = cursor.fetchall()
+                    logger.info(f"Found {len(history_rows)} previous messages")
+                    
+                    for row in history_rows:
+                        previous_messages.append({"role": "user", "content": row[0]})
+                        previous_messages.append({"role": "assistant", "content": row[1]})
+                
+                except Exception as db_error:
+                    logger.error(f"Database error: {str(db_error)}")
+                    yield f"data: {json.dumps({'error': f'Database error: {str(db_error)}'})}\n\n"
+                    return
+
+                try:
+                    logger.info("Starting bot response generation")
+                    for token in get_bot_response(user_message, previous_messages):
+                        response_text += token
+                        try:
+                            # Экранируем специальные символы только для JSON
+                            safe_token = token.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                            yield f"data: {json.dumps({'token': safe_token, 'full_response': response_text})}\n\n"
+                        except Exception as json_error:
+                            logger.error(f"JSON encoding error: {str(json_error)} for token: {token}")
+                            # В случае ошибки пропускаем проблемный токен
+                            continue
+                    logger.info("Bot response generation completed")
+                
+                except Exception as bot_error:
+                    logger.error(f"Bot response error: {str(bot_error)}")
+                    yield f"data: {json.dumps({'error': f'Bot response error: {str(bot_error)}'})}\n\n"
+                    return
+
+                try:
+                    logger.info("Saving message to database")
+                    with db:
+                        if user_id:
+                            cursor.execute('''
+                                INSERT INTO chat_history (user_id, user_message, bot_response)
+                                VALUES (?, ?, ?)
+                            ''', (user_id, user_message, response_text))
+                        else:
+                            cursor.execute('''
+                                INSERT INTO chat_history (session_id, user_message, bot_response)
+                                VALUES (?, ?, ?)
+                            ''', (session.get('anonymous_id'), user_message, response_text))
+                    logger.info("Message saved successfully")
+                
+                except Exception as save_error:
+                    logger.error(f"Error saving to database: {str(save_error)}")
+                    yield f"data: {json.dumps({'error': f'Error saving message: {str(save_error)}'})}\n\n"
 
             except Exception as e:
-                logger.error(f"Error in generate: {str(e)}")
+                logger.error(f"General error in generate: {str(e)}")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
+        logger.info("Returning response stream")
         return Response(
             stream_with_context(generate()),
             mimetype='text/event-stream',
@@ -109,72 +179,64 @@ def chat_auth():
 @bp.route('/history', methods=['GET'])
 def get_history():
     try:
-        try:
-            verify_jwt_in_request(optional=True)
-        except Exception as e:
-            logger.info(f"No valid JWT token: {str(e)}")
-
-        current_user = get_jwt_identity()
-        user_id = get_user_id(current_user) if current_user else None
-        
-        db = get_db()
-        cursor = db.cursor()
-        
-        if user_id:
-            cursor.execute('''
-                SELECT user_message, bot_response 
-                FROM chat_history 
-                WHERE user_id = ? 
-                ORDER BY timestamp ASC
-            ''', (user_id,))
-        else:
-            session_id = session.get('anonymous_id')
-            if not session_id:
-                return jsonify({'history': []})
-            
-            cursor.execute('''
-                SELECT user_message, bot_response 
-                FROM chat_history 
-                WHERE session_id = ? 
-                ORDER BY timestamp ASC
-            ''', (session_id,))
-        
-        history = [
-            {'user_message': row[0], 'bot_response': row[1]}
-            for row in cursor.fetchall()
-        ]
-        
-        return jsonify({'history': history})
+        verify_jwt_in_request(optional=True)
     except Exception as e:
-        logger.error(f"Error getting history: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.info(f"No valid JWT token: {str(e)}")
+
+    current_user = get_jwt_identity()
+    user_id = get_user_id(current_user) if current_user else None
+    
+    db = get_db()
+    cursor = db.cursor()
+    
+    if user_id:
+        cursor.execute('''
+            SELECT user_message, bot_response 
+            FROM chat_history 
+            WHERE user_id = ? 
+            ORDER BY timestamp ASC
+        ''', (user_id,))
+    else:
+        session_id = session.get('anonymous_id')
+        if not session_id:
+            return jsonify({'history': []})
+        
+        cursor.execute('''
+            SELECT user_message, bot_response 
+            FROM chat_history 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        ''', (session_id,))
+    
+    history = [
+        {'user_message': row[0], 'bot_response': row[1]}
+        for row in cursor.fetchall()
+    ]
+    
+    return jsonify({'history': history})
 
 @bp.route('/clear-history', methods=['POST'])
 def clear_history():
     try:
-        try:
-            verify_jwt_in_request(optional=True)
-        except Exception as e:
-            logger.info(f"No valid JWT token: {str(e)}")
-
-        current_user = get_jwt_identity()
-        user_id = get_user_id(current_user) if current_user else None
-        
-        db = get_db()
-        cursor = db.cursor()
-        
-        if user_id:
-            cursor.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
-        else:
-            session_id = session.get('anonymous_id')
-            if session_id:
-                cursor.execute('DELETE FROM chat_history WHERE session_id = ?', (session_id,))
-        
-        db.commit()
-        return jsonify({'message': 'История чата очищена'})
+        verify_jwt_in_request(optional=True)
     except Exception as e:
-        logger.error(f"Error clearing history: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        logger.info(f"No valid JWT token: {str(e)}")
+
+    current_user = get_jwt_identity()
+    user_id = get_user_id(current_user) if current_user else None
+    
+    db = get_db()
+    cursor = db.cursor()
+    
+    if user_id:
+        cursor.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
+    else:
+        session_id = session.get('anonymous_id')
+        if session_id:
+            cursor.execute('DELETE FROM chat_history WHERE session_id = ?', (session_id,))
+    
+    db.commit()
+    return jsonify({'message': 'История чата очищена'})
 
 @bp.route('/history-auth', methods=['GET'])
 @jwt_required()
